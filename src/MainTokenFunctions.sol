@@ -1,96 +1,82 @@
-// SPDX-License-Identifier: SEE LICENSE IN LICENSE
-pragma solidity ^0.8.20;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
 
-import "./RewardToken.sol";
-import "./StackToken.sol";
-
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 
-contract Token is ReentrancyGuard {
+contract WhaleTaxToken is ERC20, Ownable(msg.sender) {
     using Math for uint256;
 
-    IERC20 public s_stakingToken;
-    RewardToken public s_rewardToken;
+    uint256 public constant TOTAL_SUPPLY = 7500000000 * 10**18; // 7.5B tokens
+    uint256 public constant TAX_BUY = 1; // 1%
+    uint256 public constant TAX_SELL_DEFAULT = 2; // 2%
+    uint256 public constant TAX_SELL_OVER_20 = 10; // 10%
+    uint256 public constant TAX_SELL_20_30 = 20; // 20%
+    uint256 public constant TAX_SELL_OVER_30 = 30; // 30%
+    uint256 public constant MAX_TRANSACTIONS_PER_DAY = 3;
+    uint256 public constant TIME_BETWEEN_SELLS = 2 minutes;
 
-    uint public constant REWARD_RATE = 1e18;
-    uint private totalStakedTokens;
-    uint public rewardPerTokenStored;
-    uint public lastUpdateTime;
+    mapping(address => uint256) public lastSellTime;
+    mapping(address => uint256) public dailySellCount;
+    mapping(address => bool) public whitelist;
+    mapping(address => bool) public blacklist;
 
-    mapping(address => uint) public stakedBalance;
-    mapping(address => uint) public rewards;
-    mapping(address => uint) public userRewardPerTokenPaid;
-
-    event Staked(address indexed user, uint256 indexed amount);
-    event Withdrawn(address indexed user, uint256 indexed amount);
-    event RewardsClaimed(address indexed user, uint256 indexed amount);
-
-    constructor(address stakingToken, address rewardToken) {
-        s_stakingToken = IERC20(stakingToken);
-        s_rewardToken = RewardToken(rewardToken);
+    constructor() ERC20("WhaleTaxToken", "WHT") {
+        _mint(msg.sender, TOTAL_SUPPLY);
     }
 
-    function stake(uint256 amount) external nonReentrant {
-        require(amount > 0, "Amount must be greater than 0");
-        updateReward(msg.sender);
-        stakedBalance[msg.sender] += amount;
-        totalStakedTokens += amount;
-        s_stakingToken.transferFrom(msg.sender, address(this), amount);
-        emit Staked(msg.sender, amount);
-    }
+    function _transfer(address sender, address recipient, uint256 amount) internal override {
+        require(!blacklist[sender] && !blacklist[recipient], "Transfer is not allowed for blacklisted addresses.");
+        require(whitelist[sender] || whitelist[recipient], "Transfer is not allowed for non-whitelisted addresses.");
 
-    function withdraw(uint256 amount) external nonReentrant {
-        require(amount > 0, "Amount must be greater than 0");
-        updateReward(msg.sender);
-        stakedBalance[msg.sender] -= amount;
-        totalStakedTokens -= amount;
-        s_stakingToken.transfer(msg.sender, amount);
-        emit Withdrawn(msg.sender, amount);
-    }
+        if (sender != owner() && recipient != owner()) {
+            uint256 taxAmount = 0;
+            if (amount > TOTAL_SUPPLY * 20 / 100) {
+                taxAmount = amount * TAX_SELL_OVER_20 / 100;
+            } else if (amount > TOTAL_SUPPLY * 30 / 100) {
+                taxAmount = amount * TAX_SELL_OVER_30 / 100;
+            } else if (amount > TOTAL_SUPPLY * 20 / 100) {
+                taxAmount = amount * TAX_SELL_20_30 / 100;
+            } else {
+                taxAmount = amount * TAX_SELL_DEFAULT / 100;
+            }
 
-    function claimRewards() external nonReentrant {
-        updateReward(msg.sender);
-        uint256 reward = rewards[msg.sender];
-        if (reward > 0) {
-            rewards[msg.sender] = 0;
-            s_rewardToken.transfer(msg.sender, reward);
-            emit RewardsClaimed(msg.sender, reward);
+            if (block.timestamp - lastSellTime[sender] < TIME_BETWEEN_SELLS) {
+                revert("Cannot make a sell transaction two minutes after the previous one.");
+            }
+
+            if (dailySellCount[sender] >= MAX_TRANSACTIONS_PER_DAY) {
+                revert("Cannot make more than 3 transactions a day.");
+            }
+
+            lastSellTime[sender] = block.timestamp;
+            dailySellCount[sender]++;
+
+            super._transfer(sender, address(this), taxAmount);
+            super._transfer(sender, recipient, amount - taxAmount);
+        } else {
+            super._transfer(sender, recipient, amount);
         }
     }
 
-    function updateReward(address account) internal {
-        rewardPerTokenStored = rewardPerToken();
-        lastUpdateTime = lastTimeRewardApplicable();
-        if (account != address(0)) {
-            rewards[account] = earned(account);
-            userRewardPerTokenPaid[account] = rewardPerTokenStored;
-        }
+    function addToWhitelist(address _address) public onlyOwner {
+        whitelist[_address] = true;
     }
 
-    function lastTimeRewardApplicable() public view returns (uint256) {
-        return
-            block.timestamp < lastUpdateTime ? lastUpdateTime : block.timestamp;
+    function removeFromWhitelist(address _address) public onlyOwner {
+        whitelist[_address] = false;
     }
 
-    function rewardPerToken() public view returns (uint256) {
-        if (totalStakedTokens == 0) {
-            return rewardPerTokenStored;
-        }
-        return
-            rewardPerTokenStored +
-            ((lastTimeRewardApplicable() - lastUpdateTime) *
-                REWARD_RATE *
-                1e18) /
-            totalStakedTokens;
+    function addToBlacklist(address _address) public onlyOwner {
+        blacklist[_address] = true;
     }
 
-    function earned(address account) public view returns (uint256) {
-        return
-            (stakedBalance[account] *
-                (rewardPerToken() - userRewardPerTokenPaid[account])) /
-            1e18 +
-            rewards[account];
+    function removeFromBlacklist(address _address) public onlyOwner {
+        blacklist[_address] = false;
+    }
+
+    function distributeTokens() public onlyOwner {
+      
     }
 }
